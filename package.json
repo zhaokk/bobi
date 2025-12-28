@@ -1,0 +1,32 @@
+{
+  "name": "bobi",
+  "version": "0.2.0",
+  "description": "Bobi - Car AI Companion with DVR functionality (Local-First Architecture)",
+  "private": true,
+  "workspaces": [
+    "local",
+    "cloud",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w local",
+    "dev:local": "npm run dev -w local",
+    "dev:cloud": "npm run dev -w cloud",
+    "dev:all": "concurrently -n local,cloud -c green,blue \"npm run dev -w local\" \"npm run dev -w cloud\"",
+    "build": "npm run build -w local && npm run build -w cloud",
+    "build:local": "npm run build -w local",
+    "build:cloud": "npm run build -w cloud",
+    "legacy:dev": "concurrently -n server,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
+    "legacy:server": "npm run dev -w server",
+    "legacy:web": "npm run dev -w web"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
