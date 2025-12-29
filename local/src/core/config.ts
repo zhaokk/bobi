@@ -14,7 +14,7 @@
  */
 
 // Default model - single source of truth
-const DEFAULT_MODEL = 'gpt-4o-mini-realtime-preview-2024-12-17';
+const DEFAULT_MODEL = 'gpt-realtime-mini';
 const DEFAULT_VOICE = 'alloy';
 
 export const ENV = {
