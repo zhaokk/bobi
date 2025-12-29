@@ -127,7 +127,7 @@ npm install
 ### 配置
 
 ```bash
-# Local: 在 local/src/core/config.ts 配置 API Key
+# Local: 在 local/src/core/config.ts 配置 API Key (只用该这个)
 # 或设置环境变量 VITE_OPENAI_API_KEY
 
 # Cloud: 配置 API key
@@ -138,7 +138,7 @@ cp cloud/.env.example cloud/.env
 ### 运行
 
 ```bash
-# 运行设备端 (推荐)
+# 运行设备端 **(推荐)**
 npm run dev
 
 # 或同时运行设备端和云服务
