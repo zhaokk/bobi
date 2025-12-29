@@ -535,7 +535,33 @@ body {
   color: var(--text-secondary);
 }
 
-/* Bobi Avatar */
+/* Bobi Avatar - 3D Version */
+.bobi-avatar-3d {
+  width: 160px;
+  height: 160px;
+  position: relative;
+  border-radius: 50%;
+  overflow: hidden;
+  background: radial-gradient(circle at 30% 30%, #2a4a6a, #1a2a3a);
+}
+
+.bobi-avatar-3d canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.mood-label-3d {
+  position: absolute;
+  bottom: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  font-family: monospace;
+  text-transform: lowercase;
+}
+
+/* Bobi Avatar - SVG Fallback */
 .bobi-avatar {
   flex: 0 0 auto;
   display: flex;
