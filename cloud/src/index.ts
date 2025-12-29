@@ -10,11 +10,26 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { resolve } from 'path';
 
-dotenv.config();
+// Load .env from cloud folder
+dotenv.config({ path: resolve(__dirname, '../.env') });
+
+// ============== Configuration ==============
+// Single source of truth for defaults
+const DEFAULT_MODEL = 'gpt-4o-mini-realtime-preview-2024-12-17';
+const DEFAULT_VOICE = 'alloy';
+
+const CONFIG = {
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
+  OPENAI_REALTIME_MODEL: process.env.OPENAI_REALTIME_MODEL || DEFAULT_MODEL,
+  OPENAI_REALTIME_VOICE: process.env.OPENAI_REALTIME_VOICE || DEFAULT_VOICE,
+};
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.CLOUD_PORT || 3001;
+
+console.log(`📋 Config: model=${CONFIG.OPENAI_REALTIME_MODEL}, voice=${CONFIG.OPENAI_REALTIME_VOICE}`);
 
 app.use(cors());
 app.use(express.json());
@@ -33,7 +48,7 @@ app.get('/health', (_req, res) => {
  * without exposing the main API key.
  */
 app.post('/api/token/realtime', async (_req, res) => {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = CONFIG.OPENAI_API_KEY;
   
   if (!apiKey) {
     return res.status(500).json({ 
@@ -51,8 +66,8 @@ app.post('/api/token/realtime', async (_req, res) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'gpt-4o-realtime-preview-2024-12-17',
-        voice: 'alloy',
+        model: CONFIG.OPENAI_REALTIME_MODEL,
+        voice: CONFIG.OPENAI_REALTIME_VOICE,
       }),
     });
 

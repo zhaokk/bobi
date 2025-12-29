@@ -13,6 +13,7 @@ export const CameraPanel = observer(function CameraPanel() {
   const streamRef = useRef<MediaStream | null>(null);
   const [cameraStatus, setCameraStatus] = useState<'off' | 'starting' | 'on' | 'error'>('off');
   const [error, setError] = useState<string | null>(null);
+  const [selectedImage, setSelectedImage] = useState<{ imageDataUrl: string; camera: string; ts: number } | null>(null);
 
   const startCamera = useCallback(async () => {
     if (streamRef.current) return; // Already running
@@ -59,7 +60,7 @@ export const CameraPanel = observer(function CameraPanel() {
     bobiStore.updateCamera({ isActive: false });
   }, []);
 
-  const captureFrame = useCallback((): string | null => {
+  const captureFrame = useCallback((maxWidth = 640, quality = 0.6): string | null => {
     if (!videoRef.current || !canvasRef.current) return null;
     if (cameraStatus !== 'on') return null;
 
@@ -68,11 +69,27 @@ export const CameraPanel = observer(function CameraPanel() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0);
+    // Calculate compressed dimensions
+    let width = video.videoWidth;
+    let height = video.videoHeight;
     
-    return canvas.toDataURL('image/jpeg', 0.8);
+    if (width > maxWidth) {
+      const ratio = maxWidth / width;
+      width = maxWidth;
+      height = Math.round(height * ratio);
+    }
+
+    canvas.width = width;
+    canvas.height = height;
+    ctx.drawImage(video, 0, 0, width, height);
+    
+    const dataUrl = canvas.toDataURL('image/jpeg', quality);
+    
+    // Log compressed size for debugging
+    const sizeKB = Math.round((dataUrl.length * 3) / 4 / 1024);
+    bobiStore.log('DEBUG', 'Camera', `Frame captured: ${width}x${height}, ~${sizeKB}KB`);
+    
+    return dataUrl;
   }, [cameraStatus]);
 
   // Watch for frame requests from core
@@ -82,14 +99,18 @@ export const CameraPanel = observer(function CameraPanel() {
 
     const requestId = pendingRequest.requestId;
     const camera = pendingRequest.camera || 'front';
+    const maxWidth = pendingRequest.maxWidth ?? 640;
+    const quality = pendingRequest.quality ?? 0.6;
 
     // Auto-start camera if needed
     if (cameraStatus === 'off') {
       startCamera().then(() => {
         // Wait a bit for camera to stabilize
         setTimeout(() => {
-          const frame = captureFrame();
+          const frame = captureFrame(maxWidth, quality);
           if (frame) {
+            // Save to captured images history
+            bobiStore.addCapturedImage(frame, camera);
             bobiStore.fulfillFrameRequest(requestId, {
               imageDataUrl: frame,
               camera,
@@ -101,8 +122,10 @@ export const CameraPanel = observer(function CameraPanel() {
         }, 500);
       });
     } else if (cameraStatus === 'on') {
-      const frame = captureFrame();
+      const frame = captureFrame(maxWidth, quality);
       if (frame) {
+        // Save to captured images history
+        bobiStore.addCapturedImage(frame, camera);
         bobiStore.fulfillFrameRequest(requestId, {
           imageDataUrl: frame,
           camera,
@@ -182,6 +205,50 @@ export const CameraPanel = observer(function CameraPanel() {
           {cameraStatus === 'on' ? '停止' : '启动'}
         </button>
       </div>
+
+      {/* Captured Images History */}
+      {bobiStore.capturedImages.length > 0 && (
+        <div className="captured-images">
+          <div className="captured-images-header">
+            <span>📸 已发送 ({bobiStore.capturedImages.length}/{bobiStore.maxCapturedImages})</span>
+            <button 
+              className="btn btn-small btn-secondary"
+              onClick={() => bobiStore.clearCapturedImages()}
+            >
+              清空
+            </button>
+          </div>
+          <div className="captured-images-grid">
+            {bobiStore.capturedImages.slice().reverse().map((img, idx) => (
+              <div 
+                key={img.ts} 
+                className="captured-image-item"
+                onClick={() => setSelectedImage(img)}
+              >
+                <img src={img.imageDataUrl} alt={`capture-${idx}`} />
+                <div className="captured-image-info">
+                  <span className="camera-tag">{img.camera === 'front' ? '前' : '后'}</span>
+                  <span className="time-tag">{new Date(img.ts).toLocaleTimeString()}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Image Modal */}
+      {selectedImage && (
+        <div className="image-modal-overlay" onClick={() => setSelectedImage(null)}>
+          <div className="image-modal" onClick={(e) => e.stopPropagation()}>
+            <img src={selectedImage.imageDataUrl} alt="captured" />
+            <div className="image-modal-info">
+              <span>{selectedImage.camera === 'front' ? '前摄像头' : '后摄像头'}</span>
+              <span>{new Date(selectedImage.ts).toLocaleString()}</span>
+            </div>
+            <button className="image-modal-close" onClick={() => setSelectedImage(null)}>✕</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 });

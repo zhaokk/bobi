@@ -13,7 +13,8 @@ export type BobiState =
 
 // ============== Device State ==============
 
-export type Expression = 'neutral' | 'happy' | 'curious' | 'sleepy' | 'surprised' | 'concerned';
+// Mood is set by LLM, expression is randomly selected from mood variants
+export type Mood = 'neutral' | 'happy' | 'curious' | 'sleepy' | 'surprised' | 'sad';
 
 export interface HeadPose {
   yaw: number;   // -45 to 45 degrees (left/right)
@@ -24,7 +25,8 @@ export interface HeadPose {
 export interface DeviceState {
   volume: number;      // 0-100
   brightness: number;  // 0-100
-  expression: Expression;
+  mood: Mood;          // Set by LLM
+  expression: string;  // Random variant selected from mood (e.g. "happy_2")
   headPose: HeadPose;
 }
 

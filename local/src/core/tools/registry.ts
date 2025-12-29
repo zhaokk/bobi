@@ -51,7 +51,7 @@ export interface GetIMUSummaryArgs {
 export interface SetDeviceStateArgs {
   volume?: number;
   brightness?: number;
-  expression?: DeviceState['expression'];
+  mood?: DeviceState['mood'];
   headPose?: DeviceState['headPose'];
 }
 
@@ -179,9 +179,9 @@ function setDeviceState(args: SetDeviceStateArgs): { ok: boolean; error?: string
     }
   }
 
-  // Expression (no rate limit)
-  if (args.expression !== undefined) {
-    updates.expression = args.expression;
+  // Mood (no rate limit) - use setMood to randomly select expression variant
+  if (args.mood !== undefined) {
+    bobiStore.setMood(args.mood);
   }
 
   // Head pose (no rate limit, but clamp values)
@@ -193,7 +193,7 @@ function setDeviceState(args: SetDeviceStateArgs): { ok: boolean; error?: string
     };
   }
 
-  // Apply updates
+  // Apply other updates (volume, brightness, headPose - mood is handled separately)
   if (Object.keys(updates).length > 0) {
     if (args.volume !== undefined || args.brightness !== undefined) {
       deviceStateCooldown.act();

@@ -5,9 +5,7 @@
   "private": true,
   "workspaces": [
     "local",
-    "cloud",
-    "server",
-    "web"
+    "cloud"
   ],
   "scripts": {
     "dev": "npm run dev -w local",
@@ -16,10 +14,7 @@
     "dev:all": "concurrently -n local,cloud -c green,blue \"npm run dev -w local\" \"npm run dev -w cloud\"",
     "build": "npm run build -w local && npm run build -w cloud",
     "build:local": "npm run build -w local",
-    "build:cloud": "npm run build -w cloud",
-    "legacy:dev": "concurrently -n server,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
-    "legacy:server": "npm run dev -w server",
-    "legacy:web": "npm run dev -w web"
+    "build:cloud": "npm run build -w cloud"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

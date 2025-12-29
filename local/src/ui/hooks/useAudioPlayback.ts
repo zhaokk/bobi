@@ -1,28 +1,36 @@
 /**
  * useAudioPlayback Hook
- * Plays audio from the store's audioQueue
- * Uses buffering to reduce choppiness
+ * Plays audio from the store's audioQueue with interruption support
+ * Uses scheduled playback for smooth audio without gaps
  */
 
 import { useEffect, useRef, useCallback } from 'react';
 import { bobiStore } from '../../core/store';
 import { reaction } from 'mobx';
 
-// Buffer size before starting playback (in samples at 24kHz)
-const MIN_BUFFER_SAMPLES = 4800; // 200ms of audio
+// Minimum buffer before starting playback (ms)
+const MIN_BUFFER_MS = 100;
 
 export function useAudioPlayback() {
   const audioContextRef = useRef<AudioContext | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+  const scheduledSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const nextPlayTimeRef = useRef(0);
   const isPlayingRef = useRef(false);
-  const pcmBufferRef = useRef<Int16Array[]>([]);
-  const totalSamplesRef = useRef(0);
-  const nextStartTimeRef = useRef(0);
+  const bufferAccumulatorRef = useRef<Float32Array[]>([]);
+  const bufferSamplesRef = useRef(0);
+  const playbackTimerRef = useRef<number | null>(null);
 
   // Initialize AudioContext
   const initAudioContext = useCallback(() => {
     if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-      bobiStore.log('INFO', 'AudioPlayback', 'AudioContext initialized');
+      // Create GainNode for volume control
+      gainNodeRef.current = audioContextRef.current.createGain();
+      gainNodeRef.current.connect(audioContextRef.current.destination);
+      // Set initial volume from store
+      gainNodeRef.current.gain.value = bobiStore.deviceState.volume / 100;
+      bobiStore.log('INFO', 'AudioPlayback', 'AudioContext initialized with volume: ' + bobiStore.deviceState.volume);
     }
     if (audioContextRef.current.state === 'suspended') {
       audioContextRef.current.resume();
@@ -30,82 +38,152 @@ export function useAudioPlayback() {
     return audioContextRef.current;
   }, []);
 
-  // Decode base64 PCM16 to Int16Array
-  const decodeChunk = useCallback((base64: string): Int16Array | null => {
+  // Stop all playback immediately
+  const stopPlayback = useCallback(() => {
+    // Stop all scheduled sources
+    for (const source of scheduledSourcesRef.current) {
+      try {
+        source.stop();
+        source.disconnect();
+      } catch {
+        // Already stopped
+      }
+    }
+    scheduledSourcesRef.current = [];
+    bufferAccumulatorRef.current = [];
+    bufferSamplesRef.current = 0;
+    nextPlayTimeRef.current = 0;
+    isPlayingRef.current = false;
+    
+    if (playbackTimerRef.current) {
+      clearTimeout(playbackTimerRef.current);
+      playbackTimerRef.current = null;
+    }
+    
+    bobiStore.setPlayingAudio(false);
+  }, []);
+
+  // Decode base64 PCM16 to Float32Array
+  const decodeToFloat32 = useCallback((base64: string): Float32Array | null => {
     try {
       const binaryString = atob(base64);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
-      return new Int16Array(bytes.buffer);
+      const pcm16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(pcm16.length);
+      for (let i = 0; i < pcm16.length; i++) {
+        float32[i] = pcm16[i] / 32768;
+      }
+      return float32;
     } catch {
       return null;
     }
   }, []);
 
-  // Schedule audio playback
-  const schedulePlayback = useCallback(() => {
+  // Schedule a buffer for playback
+  const scheduleBuffer = useCallback((audioData: Float32Array) => {
     const audioContext = audioContextRef.current;
-    if (!audioContext || pcmBufferRef.current.length === 0) return;
+    const gainNode = gainNodeRef.current;
+    if (!audioContext || !gainNode) return;
 
-    // Merge all buffered chunks
-    const totalLength = pcmBufferRef.current.reduce((acc, arr) => acc + arr.length, 0);
-    const mergedPcm = new Int16Array(totalLength);
-    let offset = 0;
-    for (const chunk of pcmBufferRef.current) {
-      mergedPcm.set(chunk, offset);
-      offset += chunk.length;
-    }
-    pcmBufferRef.current = [];
-    totalSamplesRef.current = 0;
+    const audioBuffer = audioContext.createBuffer(1, audioData.length, 24000);
+    audioBuffer.copyToChannel(audioData, 0);
 
-    // Convert to Float32
-    const float32 = new Float32Array(mergedPcm.length);
-    for (let i = 0; i < mergedPcm.length; i++) {
-      float32[i] = mergedPcm[i] / 32768;
-    }
-
-    // Create AudioBuffer
-    const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
-    audioBuffer.copyToChannel(float32, 0);
-
-    // Schedule playback
     const source = audioContext.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(audioContext.destination);
+    source.connect(gainNode);  // Connect to GainNode for volume control
 
+    // Schedule seamlessly after previous buffer
     const currentTime = audioContext.currentTime;
-    const startTime = Math.max(currentTime, nextStartTimeRef.current);
+    const startTime = Math.max(currentTime + 0.01, nextPlayTimeRef.current);
+    
     source.start(startTime);
-    nextStartTimeRef.current = startTime + audioBuffer.duration;
+    nextPlayTimeRef.current = startTime + audioBuffer.duration;
 
+    // Track source for cleanup
+    scheduledSourcesRef.current.push(source);
+    
+    // Clean up finished sources
     source.onended = () => {
-      isPlayingRef.current = pcmBufferRef.current.length > 0;
+      const idx = scheduledSourcesRef.current.indexOf(source);
+      if (idx > -1) {
+        scheduledSourcesRef.current.splice(idx, 1);
+      }
+      // Check if all playback finished
+      if (scheduledSourcesRef.current.length === 0 && bobiStore.audioQueue.length === 0) {
+        isPlayingRef.current = false;
+        bobiStore.setPlayingAudio(false);
+      }
     };
   }, []);
 
-  // Process audio from store queue with buffering
-  const processStoreQueue = useCallback(() => {
-    initAudioContext();
+  // Flush accumulated buffer to playback
+  const flushBuffer = useCallback(() => {
+    if (bufferAccumulatorRef.current.length === 0) return;
 
-    let audioBase64: string | undefined;
-    while ((audioBase64 = bobiStore.dequeueAudio()) !== undefined) {
-      const chunk = decodeChunk(audioBase64);
-      if (chunk) {
-        pcmBufferRef.current.push(chunk);
-        totalSamplesRef.current += chunk.length;
+    // Merge accumulated chunks
+    const totalLength = bufferSamplesRef.current;
+    const merged = new Float32Array(totalLength);
+    let offset = 0;
+    for (const chunk of bufferAccumulatorRef.current) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+    
+    bufferAccumulatorRef.current = [];
+    bufferSamplesRef.current = 0;
+
+    scheduleBuffer(merged);
+  }, [scheduleBuffer]);
+
+  // Process audio queue with buffering
+  const processQueue = useCallback(() => {
+    const audioContext = initAudioContext();
+    if (!audioContext) return;
+
+    // Collect chunks from queue
+    while (bobiStore.audioQueue.length > 0) {
+      const base64 = bobiStore.dequeueAudio();
+      if (base64) {
+        const decoded = decodeToFloat32(base64);
+        if (decoded) {
+          bufferAccumulatorRef.current.push(decoded);
+          bufferSamplesRef.current += decoded.length;
+        }
       }
     }
 
-    // Start playback if we have enough buffered or if not currently playing
-    if (totalSamplesRef.current >= MIN_BUFFER_SAMPLES || !isPlayingRef.current) {
-      isPlayingRef.current = true;
-      schedulePlayback();
+    // Check if we have enough buffer to start/continue playback
+    const bufferMs = (bufferSamplesRef.current / 24000) * 1000;
+    
+    if (!isPlayingRef.current) {
+      // Wait for minimum buffer before starting
+      if (bufferMs >= MIN_BUFFER_MS) {
+        isPlayingRef.current = true;
+        bobiStore.setPlayingAudio(true);
+        flushBuffer();
+      } else {
+        // Wait a bit more for buffer to fill
+        if (!playbackTimerRef.current) {
+          playbackTimerRef.current = window.setTimeout(() => {
+            playbackTimerRef.current = null;
+            if (bufferSamplesRef.current > 0) {
+              isPlayingRef.current = true;
+              bobiStore.setPlayingAudio(true);
+              flushBuffer();
+            }
+          }, MIN_BUFFER_MS);
+        }
+      }
+    } else {
+      // Already playing - flush immediately for continuous playback
+      flushBuffer();
     }
-  }, [initAudioContext, decodeChunk, schedulePlayback]);
+  }, [initAudioContext, decodeToFloat32, flushBuffer]);
 
-  // Watch store audioQueue
+  // Watch store audioQueue and handle interruption
   useEffect(() => {
     const handleClick = () => {
       initAudioContext();
@@ -113,23 +191,48 @@ export function useAudioPlayback() {
     };
     document.addEventListener('click', handleClick);
 
-    const disposer = reaction(
+    // Watch for new audio
+    const audioDisposer = reaction(
       () => bobiStore.audioQueue.length,
       (length) => {
         if (length > 0) {
-          processStoreQueue();
+          processQueue();
+        }
+      }
+    );
+
+    // Watch for volume changes
+    const volumeDisposer = reaction(
+      () => bobiStore.deviceState.volume,
+      (volume) => {
+        if (gainNodeRef.current) {
+          gainNodeRef.current.gain.value = volume / 100;
+          bobiStore.log('DEBUG', 'AudioPlayback', `Volume set to ${volume}%`);
+        }
+      }
+    );
+
+    // Watch for interruption (queue cleared)
+    const interruptDisposer = reaction(
+      () => bobiStore.isPlayingAudio,
+      (playing) => {
+        if (!playing && scheduledSourcesRef.current.length > 0) {
+          stopPlayback();
         }
       }
     );
 
     return () => {
-      disposer();
+      audioDisposer();
+      volumeDisposer();
+      interruptDisposer();
       document.removeEventListener('click', handleClick);
+      stopPlayback();
       if (audioContextRef.current) {
         audioContextRef.current.close();
       }
     };
-  }, [initAudioContext, processStoreQueue]);
+  }, [initAudioContext, processQueue, stopPlayback]);
 
   return { initAudioContext };
 }

@@ -18,14 +18,18 @@ export const StatePanel = observer(function StatePanel() {
     return () => clearInterval(timer);
   }, []);
 
-  // Start audio capture when awake (sends audio to LLM)
+  // Start audio capture when in active dialog (sends audio to LLM)
+  // Only capture when ACTIVE_DIALOG - not during AWAKE_LISTEN (standby) mode
+  // because standby uses speech recognition for wake word detection
   useEffect(() => {
-    if (bobiStore.isAwake && !bobiStore.micActive) {
+    const shouldCapture = bobiStore.state === 'ACTIVE_DIALOG' || bobiStore.state === 'VISION_CHECK';
+    
+    if (shouldCapture && !bobiStore.micActive) {
       startCapture();
-    } else if (!bobiStore.isAwake && bobiStore.micActive) {
+    } else if (!shouldCapture && bobiStore.micActive) {
       stopCapture();
     }
-  }, [bobiStore.isAwake, bobiStore.micActive, startCapture, stopCapture]);
+  }, [bobiStore.state, bobiStore.micActive, startCapture, stopCapture]);
 
   const formatMs = (ms: number): string => {
     const seconds = Math.floor(ms / 1000);
@@ -130,6 +134,20 @@ export const StatePanel = observer(function StatePanel() {
           Session: {bobiStore.sessionId.slice(0, 20)}...
         </div>
       )}
+
+      {/* Device State JSON Debug */}
+      <div className="device-state-debug">
+        <div className="debug-header">📱 Device State</div>
+        <pre className="debug-json">
+{JSON.stringify({
+  mood: bobiStore.deviceState.mood,
+  expression: bobiStore.deviceState.expression,
+  volume: bobiStore.deviceState.volume,
+  brightness: bobiStore.deviceState.brightness,
+  headPose: bobiStore.deviceState.headPose,
+}, null, 2)}
+        </pre>
+      </div>
     </div>
   );
 });

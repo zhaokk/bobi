@@ -6,6 +6,7 @@
 import { observer } from 'mobx-react-lite';
 import { StatePanel } from './components/StatePanel';
 import { ControlPanel } from './components/ControlPanel';
+import { PersonalityPanel } from './components/PersonalityPanel';
 import { CameraPanel } from './components/CameraPanel';
 import { BobiAvatar } from './components/BobiAvatar';
 import { ConversationPanel } from './components/ConversationPanel';
@@ -31,6 +32,7 @@ export const App = observer(function App() {
           <div className="column column-left">
             <StatePanel />
             <ControlPanel />
+            <PersonalityPanel />
           </div>
 
           {/* Center Column */}

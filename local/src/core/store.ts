@@ -19,6 +19,23 @@ import type {
   CapturedFrame,
 } from './types';
 
+// Re-export personality types and constants from presets
+export {
+  type PersonalitySettings,
+  type CharacterMimicry,
+  type PersonalityPreset,
+  type OpenAIVoice,
+  CHARACTER_MIMICRY,
+  PERSONALITY_PRESETS,
+  PRESET_DISPLAY,
+  PRESET_VOICE,
+  isCharacterPreset,
+  getCharacterMimicry,
+  getPresetVoice,
+} from './presets/personality';
+
+import { PERSONALITY_PRESETS, type PersonalitySettings, type PersonalityPreset } from './presets/personality';
+
 class BobiStore {
   // ============== Connection State ==============
   realtimeStatus: RealtimeSessionStatus = 'disconnected';
@@ -36,7 +53,8 @@ class BobiStore {
   deviceState: DeviceState = {
     volume: 50,
     brightness: 70,
-    expression: 'sleepy',
+    mood: 'sleepy',
+    expression: 'sleepy_0',
     headPose: { yaw: 0, pitch: 0, roll: 0 },
   };
 
@@ -64,21 +82,78 @@ class BobiStore {
 
   // ============== Logs ==============
   logs: LogEntry[] = [];
-  maxLogs = 200;
+  maxLogs = 500;  // Increased from 200
 
   // ============== Frame Capture ==============
   pendingFrameRequest: FrameRequest | null = null;
   private frameResolvers: Map<string, (frame: CapturedFrame | null) => void> = new Map();
+  
+  // ============== Captured Images History (for debugging) ==============
+  capturedImages: Array<{ imageDataUrl: string; camera: string; ts: number }> = [];
+  maxCapturedImages = 20;
 
   // ============== Audio Queue ==============
   audioQueue: string[] = [];
+  isPlayingAudio: boolean = false;
+  audioPlayedMs: number = 0;  // Track playback position for truncation
 
   // ============== Microphone State ==============
   micLevel: number = 0;  // 0-100 audio level
   micActive: boolean = false;
 
+  // ============== Personality Settings ==============
+  personality: PersonalitySettings = { ...PERSONALITY_PRESETS.default };
+  personalityPreset: PersonalityPreset = 'default';
+  onPersonalityChange: (() => void) | null = null;  // Callback for session update
+
   constructor() {
     makeAutoObservable(this);
+  }
+
+  // ============== Personality Actions ==============
+
+  updatePersonality(key: keyof PersonalitySettings, value: number): void {
+    runInAction(() => {
+      this.personality[key] = Math.max(0, Math.min(100, value));
+      this.personalityPreset = 'default';  // Reset to custom
+    });
+    // Trigger session update callback
+    this.onPersonalityChange?.();
+  }
+
+  applyPersonalityPreset(preset: PersonalityPreset): void {
+    runInAction(() => {
+      this.personality = { ...PERSONALITY_PRESETS[preset] };
+      this.personalityPreset = preset;
+    });
+    this.onPersonalityChange?.();
+  }
+
+  setPersonalityChangeCallback(callback: (() => void) | null): void {
+    this.onPersonalityChange = callback;
+  }
+
+  // ============== Audio Playback State ==============
+  
+  setPlayingAudio(playing: boolean): void {
+    runInAction(() => {
+      this.isPlayingAudio = playing;
+      if (!playing) {
+        this.audioPlayedMs = 0;
+      }
+    });
+  }
+
+  updateAudioPlayedMs(ms: number): void {
+    this.audioPlayedMs = ms;
+  }
+
+  clearAudioQueue(): void {
+    runInAction(() => {
+      this.audioQueue = [];
+      this.isPlayingAudio = false;
+      this.audioPlayedMs = 0;
+    });
   }
 
   // ============== State Machine Actions ==============
@@ -90,14 +165,14 @@ class BobiStore {
       
       if (newState === 'AWAKE_LISTEN' && oldState === 'DVR_IDLE') {
         this.awakeStartTime = Date.now();
-        this.deviceState.expression = 'curious';
+        this.setMood('curious');
       } else if (newState === 'DVR_IDLE') {
         this.awakeStartTime = null;
         this.dialogStartTime = null;
-        this.deviceState.expression = 'sleepy';
+        this.setMood('sleepy');
       } else if (newState === 'ACTIVE_DIALOG' && oldState !== 'ACTIVE_DIALOG') {
         this.dialogStartTime = Date.now();
-        this.deviceState.expression = 'happy';
+        this.setMood('happy');
       }
     });
   }
@@ -111,6 +186,72 @@ class BobiStore {
   }
 
   // ============== Device State Actions ==============
+
+  // Number of expression variants per mood
+  private readonly MOOD_VARIANT_COUNT: Record<string, number> = {
+    happy: 3,
+    sad: 3,
+    curious: 3,
+    surprised: 3,
+    sleepy: 3,
+    neutral: 3,
+  };
+
+  // Head pose variants per mood (matches MOOD_HEAD_POSES in BobiAvatar)
+  private readonly MOOD_HEAD_POSES: Record<string, Array<{ yaw: number; pitch: number; roll: number }>> = {
+    happy: [
+      { yaw: 0, pitch: -5, roll: 0 },
+      { yaw: 8, pitch: -3, roll: 5 },
+      { yaw: -8, pitch: -3, roll: -5 },
+    ],
+    sad: [
+      { yaw: 0, pitch: 10, roll: 0 },
+      { yaw: -5, pitch: 8, roll: -3 },
+      { yaw: 5, pitch: 12, roll: 3 },
+    ],
+    curious: [
+      { yaw: 15, pitch: -5, roll: 8 },
+      { yaw: -15, pitch: -5, roll: -8 },
+      { yaw: 0, pitch: -10, roll: 12 },
+    ],
+    surprised: [
+      { yaw: 0, pitch: -8, roll: 0 },
+      { yaw: -5, pitch: -10, roll: -3 },
+      { yaw: 5, pitch: -10, roll: 3 },
+    ],
+    sleepy: [
+      { yaw: 0, pitch: 8, roll: 0 },
+      { yaw: -3, pitch: 5, roll: -10 },
+      { yaw: 3, pitch: 5, roll: 10 },
+    ],
+    neutral: [
+      { yaw: 0, pitch: 0, roll: 0 },
+      { yaw: 3, pitch: -2, roll: 0 },
+      { yaw: -3, pitch: -2, roll: 0 },
+    ]
+  };
+
+  /**
+   * Set mood and randomly select expression variant + head pose
+   */
+  setMood(mood: DeviceState['mood']): void {
+    const variantCount = this.MOOD_VARIANT_COUNT[mood] || 3;
+    const randomExpressionVariant = Math.floor(Math.random() * variantCount);
+    const expression = `${mood}_${randomExpressionVariant}`;
+    
+    // Also randomly select head pose for this mood
+    const headPoses = this.MOOD_HEAD_POSES[mood] || this.MOOD_HEAD_POSES.neutral;
+    const randomPoseIndex = Math.floor(Math.random() * headPoses.length);
+    const headPose = headPoses[randomPoseIndex];
+    
+    runInAction(() => {
+      this.deviceState.mood = mood;
+      this.deviceState.expression = expression;
+      this.deviceState.headPose = headPose;
+    });
+    
+    this.log('INFO', 'Store', `Mood set to ${mood} (expr:${randomExpressionVariant}, pose:${randomPoseIndex})`);
+  }
 
   updateDeviceState(updates: Partial<DeviceState>): void {
     runInAction(() => {
@@ -197,22 +338,38 @@ class BobiStore {
 
   // ============== Log Actions ==============
 
-  log(level: LogLevel, category: string, message: string, data?: unknown): void {
-    runInAction(() => {
-      this.logs.push({
-        level,
-        category,
-        message,
-        data,
-        ts: Date.now(),
-        timestamp: new Date(),
-      });
-      if (this.logs.length > this.maxLogs) {
-        this.logs = this.logs.slice(-this.maxLogs);
-      }
-    });
+  private readonly LOG_STORAGE_KEY = 'bobi-logs';
+  private readonly LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {
+    DEBUG: 0,
+    INFO: 1,
+    WARN: 2,
+    ERROR: 3,
+  };
 
-    // Also console log
+  log(level: LogLevel, category: string, message: string, data?: unknown): void {
+    const entry: LogEntry = {
+      level,
+      category,
+      message,
+      data,
+      ts: Date.now(),
+      timestamp: new Date(),
+    };
+
+    // Only store INFO+ logs in UI to prevent DEBUG spam from pushing out important logs
+    if (this.LOG_LEVEL_PRIORITY[level] >= this.LOG_LEVEL_PRIORITY['INFO']) {
+      runInAction(() => {
+        this.logs.push(entry);
+        if (this.logs.length > this.maxLogs) {
+          this.logs = this.logs.slice(-this.maxLogs);
+        }
+      });
+
+      // Save INFO+ logs to localStorage for debugging
+      this.saveLogToStorage(entry);
+    }
+
+    // Always console log (including DEBUG)
     const prefix = `[${new Date().toLocaleTimeString()}] [${level}] [${category}]`;
     if (level === 'ERROR') {
       console.error(prefix, message, data ?? '');
@@ -225,8 +382,66 @@ class BobiStore {
     }
   }
 
-  clearLogs(): void {
+  private saveLogToStorage(entry: LogEntry): void {
+    // Skip audio-related logs to reduce noise
+    const audioKeywords = ['audio', 'Audio', 'playback', 'Playback', 'microphone', 'Microphone', 'VAD'];
+    if (audioKeywords.some(kw => entry.message.includes(kw) || entry.category.includes(kw))) {
+      return;
+    }
+
+    try {
+      const stored = localStorage.getItem(this.LOG_STORAGE_KEY);
+      const logs: Array<{ ts: number; level: string; category: string; message: string; data?: unknown }> = 
+        stored ? JSON.parse(stored) : [];
+      
+      logs.push({
+        ts: entry.ts,
+        level: entry.level,
+        category: entry.category,
+        message: entry.message,
+        data: entry.data,
+      });
+
+      // Keep last 2000 logs in storage
+      const trimmed = logs.slice(-2000);
+      localStorage.setItem(this.LOG_STORAGE_KEY, JSON.stringify(trimmed));
+    } catch (e) {
+      // localStorage might be full or disabled
+      console.warn('Failed to save log to storage:', e);
+    }
+  }
+
+  // Export logs for debugging
+  exportLogs(): string {
+    try {
+      const stored = localStorage.getItem(this.LOG_STORAGE_KEY);
+      return stored || '[]';
+    } catch {
+      return '[]';
+    }
+  }
+
+  // Download logs as file
+  downloadLogs(): void {
+    const logs = this.exportLogs();
+    const blob = new Blob([logs], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `bobi-logs-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  clearStoredLogs(): void {
+    localStorage.removeItem(this.LOG_STORAGE_KEY);
+  }
+
+  clearLogs(clearStorage = false): void {
     this.logs = [];
+    if (clearStorage) {
+      this.clearStoredLogs();
+    }
   }
 
   // ============== Frame Capture Actions ==============
@@ -269,6 +484,33 @@ class BobiStore {
       });
       resolver(frame);
     }
+  }
+
+  /**
+   * Add a captured image to history (for debugging)
+   */
+  addCapturedImage(imageDataUrl: string, camera: string): void {
+    runInAction(() => {
+      this.capturedImages.push({
+        imageDataUrl,
+        camera,
+        ts: Date.now(),
+      });
+      // Keep only last N images
+      if (this.capturedImages.length > this.maxCapturedImages) {
+        this.capturedImages = this.capturedImages.slice(-this.maxCapturedImages);
+      }
+    });
+    this.log('INFO', 'Camera', `Captured image saved (${this.capturedImages.length}/${this.maxCapturedImages})`);
+  }
+
+  /**
+   * Clear captured images history
+   */
+  clearCapturedImages(): void {
+    runInAction(() => {
+      this.capturedImages = [];
+    });
   }
 
   // ============== Audio Actions ==============
@@ -342,13 +584,13 @@ class BobiStore {
     }
   }
 
-  get expressionEmoji(): string {
-    switch (this.deviceState.expression) {
+  get moodEmoji(): string {
+    switch (this.deviceState.mood) {
       case 'happy': return '😊';
       case 'curious': return '🤔';
       case 'sleepy': return '😴';
       case 'surprised': return '😮';
-      case 'concerned': return '😟';
+      case 'sad': return '😢';
       case 'neutral':
       default: return '😐';
     }

@@ -57,8 +57,9 @@ class Orchestrator {
    * Wake up Bobi (triggered by wake word or UI)
    */
   async wake(): Promise<void> {
-    if (bobiStore.isAwake) {
-      bobiStore.log('DEBUG', 'Orchestrator', 'Already awake');
+    // If already in active dialog with LLM connected, just reset timer
+    if (bobiStore.state === 'ACTIVE_DIALOG' && this.llm?.isConnected()) {
+      bobiStore.log('DEBUG', 'Orchestrator', 'Already in active dialog');
       this.resetAwakeTimer();
       return;
     }
@@ -66,7 +67,7 @@ class Orchestrator {
     bobiStore.setState('AWAKE_LISTEN');
     bobiStore.log('INFO', 'Orchestrator', 'Bobi woke up!');
 
-    // Connect to LLM
+    // Connect to LLM (or reconnect if was in standby)
     await this.connectLLM();
 
     // Start awake timeout
@@ -85,13 +86,24 @@ class Orchestrator {
   }
 
   /**
-   * Return to DVR idle mode
+   * Return to DVR idle mode (full shutdown)
    */
   sleep(): void {
     bobiStore.setState('DVR_IDLE');
     this.disconnectLLM();
     this.clearTimers();
     bobiStore.log('INFO', 'Orchestrator', 'Bobi went to sleep (DVR mode)');
+  }
+
+  /**
+   * End conversation but stay in listening mode (standby)
+   * Called when user says goodbye - disconnects realtime API but keeps wake word detection active
+   */
+  standby(): void {
+    bobiStore.setState('AWAKE_LISTEN');
+    this.disconnectLLM();
+    this.clearTimers();
+    bobiStore.log('INFO', 'Orchestrator', 'Bobi on standby - listening for wake word');
   }
 
   // ============== Dialog ==============
@@ -133,6 +145,11 @@ class Orchestrator {
       this.setupLLMHandlers();
       await this.llm.connect(this.ephemeralToken);
       
+      // Set up personality change callback for real-time updates
+      bobiStore.setPersonalityChangeCallback(() => {
+        this.llm?.updateSessionInstructions?.();
+      });
+      
       bobiStore.log('INFO', 'Orchestrator', `LLM connected: ${this.llm.name}`);
     } catch (err) {
       bobiStore.log('ERROR', 'Orchestrator', 'Failed to connect LLM', err);
@@ -142,6 +159,7 @@ class Orchestrator {
 
   private disconnectLLM(): void {
     if (this.llm) {
+      bobiStore.setPersonalityChangeCallback(null);  // Clear callback
       this.llm.disconnect();
       this.llm = null;
       this.ephemeralToken = null;
@@ -182,9 +200,9 @@ class Orchestrator {
   private setupLLMHandlers(): void {
     if (!this.llm) return;
 
-    this.llm.on('connected', (sessionId) => {
+    this.llm.on('connected', (sessionId, model) => {
       bobiStore.setSessionId(sessionId);
-      bobiStore.setRealtimeStatus('connected', this.llm?.name);
+      bobiStore.setRealtimeStatus('connected', model || this.llm?.name);
     });
 
     this.llm.on('disconnected', () => {
@@ -205,6 +223,25 @@ class Orchestrator {
 
     this.llm.on('toolCall', async (toolCall) => {
       bobiStore.log('INFO', 'Orchestrator', `Tool call: ${toolCall.name}`, toolCall.arguments);
+
+      // Handle end_conversation - schedule standby after response completes
+      if (toolCall.name === 'end_conversation') {
+        bobiStore.log('INFO', 'Orchestrator', 'User wants to end conversation');
+        
+        // Submit empty result so LLM can send farewell
+        if (this.llm?.isConnected()) {
+          this.llm.submitToolResult({ callId: toolCall.callId, result: { success: true } });
+        }
+        
+        // Wait for farewell audio to play (give some time for LLM to respond)
+        // Then go to standby - keeps listening for wake word but disconnects realtime API
+        setTimeout(() => {
+          bobiStore.log('INFO', 'Orchestrator', 'Ending conversation, going to standby');
+          this.standby();
+        }, 5000); // 5 seconds should be enough for a short goodbye
+        
+        return; // Don't execute as regular tool
+      }
 
       // Enter vision check state if capturing frame
       if (toolCall.name === 'capture_frame') {
@@ -235,6 +272,24 @@ class Orchestrator {
       this.startDialog();
       this.recordInteraction();
       bobiStore.addUserMessage(text);
+    });
+
+    // Handle interruption events per OpenAI Realtime API docs
+    this.llm.on('speechStarted', () => {
+      // User started speaking - clear audio queue for faster interruption
+      bobiStore.log('DEBUG', 'Orchestrator', 'User interruption - clearing audio queue');
+      bobiStore.clearAudioQueue();
+    });
+
+    this.llm.on('speechStopped', () => {
+      // User stopped speaking
+      bobiStore.log('DEBUG', 'Orchestrator', 'User speech ended');
+    });
+
+    this.llm.on('responseCancelled', () => {
+      // Response was cancelled due to interruption
+      bobiStore.log('DEBUG', 'Orchestrator', 'Response cancelled');
+      bobiStore.clearAudioQueue();
     });
 
     this.llm.on('error', (error) => {

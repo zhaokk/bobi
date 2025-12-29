@@ -5,10 +5,10 @@
  * API Reference: https://platform.openai.com/docs/guides/realtime
  */
 
-import { bobiStore } from '../store';
+import { bobiStore, isCharacterPreset, getPresetVoice } from '../store';
 import { ENV } from '../config';
 import type { LLMProvider, LLMProviderEvents } from './LLMProvider';
-import { BOBI_SYSTEM_INSTRUCTIONS, BOBI_TOOLS } from './LLMProvider';
+import { buildSystemInstructions, BOBI_TOOLS } from './LLMProvider';
 import type { ToolCall, ToolResult } from '../types';
 
 // Simple event emitter for browser
@@ -50,6 +50,7 @@ export class OpenAIRealtimeClient extends SimpleEventEmitter implements LLMProvi
   private ws: WebSocket | null = null;
   private sessionId: string | null = null;
   private currentTurnId: string = '';
+  private currentItemId: string = '';  // Track current response item for truncation
   private pendingToolCalls: Map<string, ToolCall> = new Map();
   private responseText: string = '';
 
@@ -142,25 +143,59 @@ export class OpenAIRealtimeClient extends SimpleEventEmitter implements LLMProvi
   }
 
   private configureSession(): void {
+    // Get character preset if it's a character mimicry preset
+    const characterPreset = isCharacterPreset(bobiStore.personalityPreset) 
+      ? bobiStore.personalityPreset 
+      : undefined;
+    const instructions = buildSystemInstructions(bobiStore.personality, characterPreset);
+    const voice = getPresetVoice(bobiStore.personalityPreset);
+    
+    bobiStore.log('INFO', 'RealtimeClient', `Configuring session with voice: ${voice}`);
+    
     this.send({
       type: 'session.update',
       session: {
         modalities: ['text', 'audio'],
-        instructions: BOBI_SYSTEM_INSTRUCTIONS,
-        voice: 'alloy',
+        instructions,
+        voice,
         input_audio_format: 'pcm16',
         output_audio_format: 'pcm16',
         input_audio_transcription: {
           model: 'whisper-1',
         },
+        // Low-latency VAD configuration
         turn_detection: {
-          type: 'server_vad',
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 800,
+          type: 'semantic_vad',       // Semantic VAD for smarter turn detection
+          eagerness: 'high',          // Fastest response triggering
+          create_response: true,
+          interrupt_response: true,   // Allow user interruptions
         },
         tools: BOBI_TOOLS,
         tool_choice: 'auto',
+      },
+    });
+  }
+
+  /**
+   * Update session instructions mid-conversation (for personality changes)
+   */
+  updateSessionInstructions(): void {
+    if (!this.isConnected()) return;
+    
+    // Get character preset if it's a character mimicry preset
+    const characterPreset = isCharacterPreset(bobiStore.personalityPreset) 
+      ? bobiStore.personalityPreset 
+      : undefined;
+    const instructions = buildSystemInstructions(bobiStore.personality, characterPreset);
+    const voice = getPresetVoice(bobiStore.personalityPreset);
+    
+    bobiStore.log('INFO', 'RealtimeClient', `Updating session: voice=${voice}`);
+    
+    this.send({
+      type: 'session.update',
+      session: {
+        instructions,
+        voice,
       },
     });
   }
@@ -172,9 +207,9 @@ export class OpenAIRealtimeClient extends SimpleEventEmitter implements LLMProvi
       case 'session.created': {
         const session = event.session as { id: string; model: string };
         this.sessionId = session.id;
-        bobiStore.log('INFO', 'RealtimeClient', `Session created: ${this.sessionId}`);
+        bobiStore.log('INFO', 'RealtimeClient', `Session created: ${this.sessionId}, model: ${session.model}`);
         this.configureSession();
-        this.emit('connected', this.sessionId);
+        this.emit('connected', this.sessionId, session.model);
         break;
       }
 
@@ -251,7 +286,7 @@ export class OpenAIRealtimeClient extends SimpleEventEmitter implements LLMProvi
           const args = JSON.parse(event.arguments as string);
           const toolCall: ToolCall = { name, arguments: args, callId };
           this.pendingToolCalls.set(callId, toolCall);
-          bobiStore.log('INFO', 'RealtimeClient', `Tool call: ${name}`, args);
+          bobiStore.log('INFO', 'RealtimeClient', `Tool call: ${name} ${JSON.stringify(args)}`);
           this.emit('toolCall', toolCall);
         } catch (err) {
           bobiStore.log('ERROR', 'RealtimeClient', 'Failed to parse tool arguments', err);
@@ -277,14 +312,17 @@ export class OpenAIRealtimeClient extends SimpleEventEmitter implements LLMProvi
         break;
       }
 
-      // VAD events - log for debugging
+      // VAD events - handle interruption per OpenAI docs
       case 'input_audio_buffer.speech_started': {
-        bobiStore.log('INFO', 'RealtimeClient', '🎤 Speech detected - user is speaking');
+        bobiStore.log('INFO', 'RealtimeClient', '🎤 Speech detected - interrupting');
+        // Emit event so UI can stop audio playback immediately
+        this.emit('speechStarted');
         break;
       }
 
       case 'input_audio_buffer.speech_stopped': {
-        bobiStore.log('INFO', 'RealtimeClient', '🎤 Speech stopped - user stopped speaking');
+        bobiStore.log('INFO', 'RealtimeClient', '🎤 Speech stopped');
+        this.emit('speechStopped');
         break;
       }
 
@@ -293,9 +331,31 @@ export class OpenAIRealtimeClient extends SimpleEventEmitter implements LLMProvi
         break;
       }
 
+      // Response lifecycle events
+      case 'response.output_item.added': {
+        const item = event.item as { id: string; type: string };
+        if (item.type === 'message') {
+          this.currentItemId = item.id;
+        }
+        break;
+      }
+
+      case 'response.cancelled': {
+        bobiStore.log('INFO', 'RealtimeClient', '⏹️ Response cancelled (user interrupted)');
+        // Clear current response text on cancellation
+        this.responseText = '';
+        this.emit('responseCancelled');
+        break;
+      }
+
       case 'conversation.item.created': {
-        const item = event.item as { type: string; role?: string };
+        const item = event.item as { id: string; type: string; role?: string };
         bobiStore.log('DEBUG', 'RealtimeClient', `Conversation item created: ${item.type} (${item.role || 'system'})`);
+        break;
+      }
+
+      case 'conversation.item.truncated': {
+        bobiStore.log('DEBUG', 'RealtimeClient', 'Conversation item truncated');
         break;
       }
 
@@ -321,6 +381,24 @@ export class OpenAIRealtimeClient extends SimpleEventEmitter implements LLMProvi
     }
   }
 
+  // Truncate the last response at the specified audio position
+  truncateResponse(audioEndMs: number): void {
+    if (this.currentItemId) {
+      this.send({
+        type: 'conversation.item.truncate',
+        item_id: this.currentItemId,
+        content_index: 0,
+        audio_end_ms: audioEndMs,
+      });
+      bobiStore.log('DEBUG', 'RealtimeClient', `Truncating response at ${audioEndMs}ms`);
+    }
+  }
+
+  // Cancel current response
+  cancelResponse(): void {
+    this.send({ type: 'response.cancel' });
+  }
+
   sendText(text: string): void {
     this.send({
       type: 'conversation.item.create',
@@ -344,16 +422,21 @@ export class OpenAIRealtimeClient extends SimpleEventEmitter implements LLMProvi
     this.send({ type: 'input_audio_buffer.commit' });
   }
 
-  sendImage(imageBase64: string, prompt?: string): void {
+  sendImage(imageDataUrl: string, prompt?: string): void {
+    // For OpenAI Realtime API, image_url should be the data URL string directly
     const content: Array<{ type: string; [key: string]: unknown }> = [];
     
     if (prompt) {
       content.push({ type: 'input_text', text: prompt });
     }
     
-    // Remove data URL prefix if present
-    const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
-    content.push({ type: 'input_image', image: base64Data });
+    // OpenAI Realtime API expects: { type: 'input_image', image_url: 'data:image/...' }
+    content.push({ 
+      type: 'input_image', 
+      image_url: imageDataUrl
+    });
+
+    bobiStore.log('DEBUG', 'RealtimeClient', `Sending image (${Math.round(imageDataUrl.length / 1024)}KB)`);
 
     this.send({
       type: 'conversation.item.create',
@@ -380,10 +463,6 @@ export class OpenAIRealtimeClient extends SimpleEventEmitter implements LLMProvi
       },
     });
     this.send({ type: 'response.create' });
-  }
-
-  cancelResponse(): void {
-    this.send({ type: 'response.cancel' });
   }
 
   // Type-safe event methods

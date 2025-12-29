@@ -44,32 +44,146 @@ declare global {
 
 type PowerState = 'off' | 'listening' | 'awake';
 
-// Wake word variations (fuzzy matching)
-const WAKE_PATTERNS = [
-  /h[aie]+\s*bob+[iy]/i,
-  /hey\s*bob+[iy]/i,
-  /hi\s*bob+[iy]/i,
-  /hello\s*bob+[iy]/i,
-  /嗨\s*波比/,
-  /嘿\s*波比/,
-  /你好\s*波比/,
+// ============== Fuzzy Wake Word Detection ==============
+
+// Target wake words to match against
+const WAKE_WORDS = [
+  // English variants
+  'hi bobi', 'hey bobi', 'hello bobi', 'yo bobi', 'ok bobi',
+  'bobi', 'bobby', 'boby', 'bobe', 'bobi',
+  // Common misrecognitions
+  'hi bobby', 'hey bobby', 'hello bobby', 'high bobi', 'hi baby',
+  'bobbi', 'babi', 'pobi', 'popi', 'poppy', 'hobby',
+  // Chinese variants
+  '嗨波比', '嘿波比', '你好波比', '喂波比', '波比',
+  '嗨博比', '嘿博比', '你好博比', '博比',
+  '嗨伯比', '嘿伯比', '你好伯比', '伯比',
+  '播比', '拨比', '泊比',
+  // Mixed language
+  'hi波比', 'hey波比', '嗨bobi', '嘿bobi',
 ];
 
+// Regex patterns for quick matching (faster than Dice)
+const WAKE_PATTERNS = [
+  // English patterns
+  /h[aei]+\s*bob+[iy]+e?/i,
+  /hello\s*bob+[iy]+e?/i,
+  /yo\s*bob+[iy]+e?/i,
+  /ok\s*bob+[iy]+e?/i,
+  /wake\s*up\s*bob+[iy]+e?/i,
+  /bobi/i,
+  /bob+[iy]/i,
+  // Relaxed patterns for misrecognitions
+  /[bp][ao][bp]+[iy]/i,           // bobi/babi/popi/poppy
+  /h[aio]+\s*[bp][ao][bp]+/i,     // hi/hey/high + bob/pop/bab
+  // Chinese patterns
+  /[嗨嘿哈嘻喂].{0,2}[波博伯播拨泊]/,  // Allow noise between
+  /你好.{0,2}[波博伯播拨泊]/,
+  /[波博伯播拨泊].?比/,
+  // Mixed language
+  /(hi|hey|hello).{0,3}(波比|博比|伯比)/i,
+  /[嗨嘿喂].{0,2}(bobi|bobby)/i,
+];
+
+/**
+ * Normalize text by replacing common misrecognized characters
+ */
+function normalizeText(text: string): string {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, ' ')
+    // Chinese character normalization
+    .replace(/[播拨泊]/g, '波')
+    .replace(/[鼻逼币必]/g, '比')
+    // English normalization
+    .replace(/baby|bobby|babi|poppy/gi, 'bobi')
+    .replace(/high\s+/gi, 'hi ');
+}
+
+/**
+ * Dice coefficient for string similarity (O(n) complexity)
+ * Returns 0-1, where 1 is exact match
+ */
+function diceCoefficient(s1: string, s2: string): number {
+  if (s1 === s2) return 1;
+  if (s1.length < 2 || s2.length < 2) return 0;
+
+  const getBigrams = (s: string): Map<string, number> => {
+    const map = new Map<string, number>();
+    for (let i = 0; i < s.length - 1; i++) {
+      const bigram = s.substring(i, i + 2);
+      map.set(bigram, (map.get(bigram) || 0) + 1);
+    }
+    return map;
+  };
+
+  const bigrams1 = getBigrams(s1);
+  const bigrams2 = getBigrams(s2);
+
+  let intersectionSize = 0;
+  for (const [bigram, count] of bigrams1) {
+    intersectionSize += Math.min(count, bigrams2.get(bigram) || 0);
+  }
+
+  return (2 * intersectionSize) / (s1.length - 1 + s2.length - 1);
+}
+
+/**
+ * Check if text matches wake word using multiple strategies:
+ * 1. Regex patterns (fast, handles variations)
+ * 2. Dice coefficient similarity (fuzzy matching)
+ */
 function matchesWakeWord(text: string): boolean {
-  const normalized = text.toLowerCase().trim();
-  return WAKE_PATTERNS.some(pattern => pattern.test(normalized));
+  const normalized = normalizeText(text);
+  
+  // Strategy 1: Regex patterns (fast path)
+  if (WAKE_PATTERNS.some(pattern => pattern.test(normalized))) {
+    return true;
+  }
+  
+  // Strategy 2: Dice coefficient similarity
+  // Check against each wake word variant
+  const SIMILARITY_THRESHOLD = 0.35; // 35% similarity required (lowered for better detection)
+  
+  for (const wakeWord of WAKE_WORDS) {
+    // Check full text
+    if (diceCoefficient(normalized, wakeWord) >= SIMILARITY_THRESHOLD) {
+      return true;
+    }
+    
+    // Check each word in the text (for longer utterances)
+    const words = normalized.split(' ');
+    for (let i = 0; i < words.length; i++) {
+      // Check single word
+      if (diceCoefficient(words[i], wakeWord) >= SIMILARITY_THRESHOLD) {
+        return true;
+      }
+      // Check word pairs (e.g., "hi bobi")
+      if (i < words.length - 1) {
+        const pair = words[i] + ' ' + words[i + 1];
+        if (diceCoefficient(pair, wakeWord) >= SIMILARITY_THRESHOLD) {
+          return true;
+        }
+      }
+    }
+  }
+  
+  return false;
 }
 
 export const ControlPanel = observer(function ControlPanel() {
   const [powerState, setPowerState] = useState<PowerState>('off');
   const [micError, setMicError] = useState<string | null>(null);
   const [lastHeard, setLastHeard] = useState<string>('');
+  const [wakeConfidence, setWakeConfidence] = useState(0);
   const [textInput, setTextInput] = useState('');
   const [gpsLat, setGpsLat] = useState('39.9042');
   const [gpsLng, setGpsLng] = useState('116.4074');
 
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const powerStateRef = useRef<PowerState>('off');
+  const wakeDetectionCountRef = useRef(0);
 
   useEffect(() => {
     powerStateRef.current = powerState;
@@ -77,69 +191,6 @@ export const ControlPanel = observer(function ControlPanel() {
 
   useEffect(() => {
     return () => stopEverything();
-  }, []);
-
-  // Sync with bobiStore state
-  useEffect(() => {
-    if (bobiStore.isAwake && powerState !== 'awake') {
-      setPowerState('awake');
-    } else if (!bobiStore.isAwake && powerState === 'awake') {
-      setPowerState('off');
-    }
-  }, [bobiStore.state]);
-
-  const startWakeWordListening = useCallback(async () => {
-    try {
-      setMicError(null);
-
-      const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SpeechRecognitionAPI) {
-        setMicError('浏览器不支持语音识别，请使用手动唤醒');
-        return;
-      }
-
-      await navigator.mediaDevices.getUserMedia({ audio: true });
-
-      const recognition = new SpeechRecognitionAPI();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-
-      recognition.onresult = (event: SpeechRecognitionEvent) => {
-        let transcript = '';
-        let isFinal = false;
-        
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          transcript += event.results[i][0].transcript;
-          if (event.results[i].isFinal) isFinal = true;
-        }
-        
-        setLastHeard(transcript);
-
-        if (matchesWakeWord(transcript) && isFinal) {
-          handleWakeUp();
-        }
-      };
-
-      recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-        if (event.error === 'not-allowed') {
-          setMicError('麦克风权限被拒绝');
-        }
-      };
-
-      recognition.onend = () => {
-        if (powerStateRef.current === 'listening' && recognitionRef.current) {
-          try { recognitionRef.current.start(); } catch (_e) { /* ignore */ }
-        }
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
-      setPowerState('listening');
-
-    } catch (err) {
-      setMicError(err instanceof Error ? err.message : '无法访问麦克风');
-    }
   }, []);
 
   const handleWakeUp = useCallback(async () => {
@@ -153,6 +204,132 @@ export const ControlPanel = observer(function ControlPanel() {
     // Wake up via orchestrator (connects to LLM directly)
     await orchestrator.wake();
   }, []);
+
+  const startWakeWordListening = useCallback(async () => {
+    console.log('👂 startWakeWordListening called...');
+    
+    // Clean up any existing recognition first
+    if (recognitionRef.current) {
+      console.log('🧹 Cleaning up existing recognition...');
+      try {
+        recognitionRef.current.stop();
+      } catch (_e) { /* ignore */ }
+      recognitionRef.current = null;
+    }
+    
+    try {
+      setMicError(null);
+      wakeDetectionCountRef.current = 0;
+      setWakeConfidence(0);
+
+      const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognitionAPI) {
+        setMicError('浏览器不支持语音识别，请使用手动唤醒');
+        return;
+      }
+
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      const recognition = new SpeechRecognitionAPI();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      // Use English as primary language for better "Hi Bobi" recognition
+      // Chinese variants will still be matched via fuzzy matching
+      recognition.lang = 'en-US';
+
+      recognition.onresult = (event: SpeechRecognitionEvent) => {
+        let transcript = '';
+        let isFinal = false;
+        
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            isFinal = true;
+          }
+        }
+        
+        setLastHeard(transcript);
+
+        // Check for wake word with fuzzy matching
+        if (matchesWakeWord(transcript)) {
+          wakeDetectionCountRef.current++;
+          setWakeConfidence(Math.min(100, wakeDetectionCountRef.current * 50));
+          
+          console.log(`🎤 Wake word candidate: "${transcript}" (count: ${wakeDetectionCountRef.current})`);
+          
+          // Trigger on first detection (lowered threshold for better responsiveness)
+          if (isFinal || wakeDetectionCountRef.current >= 1) {
+            console.log('✅ Wake word confirmed!');
+            handleWakeUp();
+          }
+        }
+      };
+
+      recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+        console.error('Speech recognition error:', event.error);
+        if (event.error === 'not-allowed') {
+          setMicError('麦克风权限被拒绝');
+        } else if (event.error !== 'no-speech' && event.error !== 'aborted') {
+          // Restart on other errors
+          setTimeout(() => {
+            if (powerStateRef.current === 'listening' && recognitionRef.current) {
+              try { recognitionRef.current.start(); } catch (_e) { /* ignore */ }
+            }
+          }, 500);
+        }
+      };
+
+      recognition.onend = () => {
+        console.log(`🔚 Recognition ended. powerState=${powerStateRef.current}, hasRef=${!!recognitionRef.current}`);
+        if (powerStateRef.current === 'listening' && recognitionRef.current) {
+          // Reset detection count on session end
+          wakeDetectionCountRef.current = 0;
+          setWakeConfidence(0);
+          console.log('🔁 Auto-restarting recognition...');
+          try { recognitionRef.current.start(); } catch (_e) { /* ignore */ }
+        }
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+      setPowerState('listening');
+      console.log('👂 ✅ Wake word listening started successfully!');
+
+    } catch (err) {
+      console.error('❌ Failed to start wake word listening:', err);
+      setMicError(err instanceof Error ? err.message : '无法访问麦克风');
+    }
+  }, [handleWakeUp]);
+
+  // Sync with bobiStore state
+  useEffect(() => {
+    const state = bobiStore.state;
+    const isConnected = bobiStore.realtimeStatus === 'connected';
+    
+    console.log(`📊 State sync: state=${state}, isConnected=${isConnected}, recognitionRef=${!!recognitionRef.current}`);
+    
+    if (state === 'ACTIVE_DIALOG' || state === 'VISION_CHECK' || (state === 'AWAKE_LISTEN' && isConnected)) {
+      // Active conversation or connected to LLM
+      setPowerState('awake');
+    } else if (state === 'AWAKE_LISTEN' && !isConnected) {
+      // Standby mode - listening for wake word but not connected to LLM
+      setPowerState('listening');
+      // Restart wake word listening if not already active
+      // Use a small delay to ensure state is fully updated
+      if (!recognitionRef.current) {
+        console.log('🔄 Scheduling wake word listening restart...');
+        setTimeout(() => {
+          if (bobiStore.state === 'AWAKE_LISTEN' && bobiStore.realtimeStatus !== 'connected' && !recognitionRef.current) {
+            console.log('🔄 Restarting wake word listening after standby...');
+            startWakeWordListening();
+          }
+        }, 300);
+      }
+    } else if (state === 'DVR_IDLE') {
+      // Fully off
+      setPowerState('off');
+    }
+  }, [bobiStore.state, bobiStore.realtimeStatus, startWakeWordListening]);
 
   const stopEverything = useCallback(() => {
     if (recognitionRef.current) {
@@ -210,6 +387,9 @@ export const ControlPanel = observer(function ControlPanel() {
             <div className="listening-status">
               <span className="listening-icon">👂</span>
               <span>等待唤醒词...</span>
+              {wakeConfidence > 0 && (
+                <span className="wake-confidence">({wakeConfidence}%)</span>
+              )}
             </div>
             {lastHeard && <div className="last-heard">听到: "{lastHeard}"</div>}
             <button className="btn btn-manual-wake" onClick={handleWakeUp}>
